@@ -19,3 +19,13 @@ azure-devops = { project = "alecmocatta/template-rust", pipeline = "tests" }
 maintenance = { status = "passively-maintained" }
 
 [dependencies]
+futures = "0.3"
+rcgen = "0.7"
+tokio = { version = "0.2", features = ["macros"] }
+# quinn = { version = "0.5", git = "https://github.com/djc/quinn" }
+quinn = { version = "0.5", path = "quinn/quinn" }
+
+
+[profile.release]
+debug = true
+overflow-checks = true
