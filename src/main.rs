@@ -4,7 +4,7 @@ use itertools::Itertools;
 use quinn::{Certificate, ClientConfig, ClientConfigBuilder, ServerConfigBuilder};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::{
-	net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket}, sync::{Arc, Mutex}
+	collections::HashMap, net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket}, sync::{Arc, Mutex}
 };
 
 #[tokio::main]
@@ -96,6 +96,8 @@ const CERT_DOMAIN: &str = "a";
 pub struct Endpoint {
 	listen: quinn::Endpoint,
 	incoming: Mutex<quinn::Incoming>,
+	synchronize: Synchronize,
+	incoming_: Mutex<HashMap<u16, quinn::RecvStream>>,
 	connect: quinn::Endpoint,
 	pid: Pid,
 }
@@ -131,6 +133,8 @@ impl Endpoint {
 		Self {
 			listen: listen_endpoint,
 			incoming: Mutex::new(incoming),
+			synchronize: Synchronize::new(),
+			incoming_: Mutex::new(HashMap::new()),
 			connect: connect_endpoint,
 			pid: Pid(addr, cert),
 		}
@@ -149,20 +153,98 @@ impl Endpoint {
 		sender
 	}
 	pub async fn receiver(&self, pid: Pid) -> quinn::RecvStream {
-		let connecting = self.incoming.try_lock().unwrap().next().await;
-		let quinn::NewConnection { mut uni_streams, .. } =
-			connecting.expect("accept").await.expect("connect");
-		let mut receiver = uni_streams.next().await.unwrap().unwrap();
-		let mut buf = [0; 2];
-		receiver.read_exact(&mut buf).await.unwrap();
-		let port = u16::from_ne_bytes(buf);
-		assert_eq!(port, pid.0.port(), "todo");
-		receiver
+		loop {
+			if let Some(receiver) = self.incoming_.lock().unwrap().remove(&pid.0.port()) {
+				return receiver;
+			}
+			self.synchronize
+				.synchronize(async {
+					let connecting = self.incoming.try_lock().unwrap().next().await;
+					let quinn::NewConnection { mut uni_streams, .. } =
+						connecting.expect("accept").await.expect("connect");
+					let mut receiver = uni_streams.next().await.unwrap().unwrap();
+					let mut buf = [0; 2];
+					receiver.read_exact(&mut buf).await.unwrap();
+					let port = u16::from_ne_bytes(buf);
+					self.incoming_.lock().unwrap().insert(port, receiver);
+				})
+				.await;
+		}
 	}
 	pub async fn wait_idle(&self) {
 		tokio::join!(self.listen.wait_idle(), self.connect.wait_idle());
 	}
 	pub fn pid(&self) -> Pid {
 		self.pid.clone()
+	}
+}
+
+use synchronize::Synchronize;
+mod synchronize {
+	use std::{
+		future::Future, mem, sync::{
+			atomic::{AtomicBool, AtomicUsize, Ordering}, Mutex
+		}, task::{Poll, Waker}
+	};
+
+	pub struct OnDrop<F: FnOnce()>(Option<F>);
+	impl<F: FnOnce()> OnDrop<F> {
+		pub fn new(f: F) -> Self {
+			Self(Some(f))
+		}
+		pub fn cancel(mut self) {
+			let _ = self.0.take().unwrap();
+			mem::forget(self);
+		}
+	}
+	impl<F: FnOnce()> Drop for OnDrop<F> {
+		fn drop(&mut self) {
+			self.0.take().unwrap()();
+		}
+	}
+
+	#[derive(Debug)]
+	pub struct Synchronize {
+		nonce: AtomicUsize,
+		running: AtomicBool,
+		wake: Mutex<Vec<Waker>>,
+	}
+	impl Synchronize {
+		pub fn new() -> Self {
+			Self {
+				nonce: AtomicUsize::new(0),
+				running: AtomicBool::new(false),
+				wake: Mutex::new(Vec::new()),
+			}
+		}
+		pub fn synchronize<'a, F>(&'a self, f: F) -> impl Future<Output = ()> + 'a
+		where
+			F: Future<Output = ()> + 'a,
+			Self: 'a,
+		{
+			async move {
+				let nonce = self.nonce.load(Ordering::SeqCst);
+				if !self.running.compare_and_swap(false, true, Ordering::SeqCst) {
+					let on_drop = OnDrop::new(|| self.running.store(false, Ordering::SeqCst));
+					f.await;
+					on_drop.cancel();
+					let _ = self.nonce.fetch_add(1, Ordering::SeqCst);
+					self.running.store(false, Ordering::SeqCst);
+					for waker in mem::replace(&mut *self.wake.lock().unwrap(), Vec::new()) {
+						waker.wake();
+					}
+					return;
+				}
+				futures::future::poll_fn(|cx| {
+					self.wake.lock().unwrap().push(cx.waker().clone());
+					if nonce != self.nonce.load(Ordering::SeqCst) {
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					}
+				})
+				.await
+			}
+		}
 	}
 }
