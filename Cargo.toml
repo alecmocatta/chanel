@@ -1,5 +1,5 @@
 [package]
-name = "template-rust"
+name = "chanel"
 version = "0.1.0"
 license = "MIT OR Apache-2.0"
 authors = ["Alec Mocatta <alec@mocatta.net>"]
@@ -8,24 +8,23 @@ keywords = []
 description = """
 A template Rust library crate.
 """
-repository = "https://github.com/alecmocatta/template-rust"
-homepage = "https://github.com/alecmocatta/template-rust"
-documentation = "https://docs.rs/template-rust/0.1.0"
+repository = "https://github.com/alecmocatta/chanel"
+homepage = "https://github.com/alecmocatta/chanel"
+documentation = "https://docs.rs/chanel/0.1.0"
 readme = "README.md"
 edition = "2018"
 
 [badges]
-azure-devops = { project = "alecmocatta/template-rust", pipeline = "tests" }
-maintenance = { status = "passively-maintained" }
+azure-devops = { project = "alecmocatta/chanel", pipeline = "tests" }
+maintenance = { status = "actively-developed" }
 
 [dependencies]
 futures = "0.3"
-rcgen = "0.7"
-tokio = { version = "0.2", features = ["macros"] }
-quinn = { version = "0.5", git = "https://github.com/djc/quinn", branch = "sync-defragmented" }
-# quinn = { version = "0.5", path = "quinn/quinn" }
-rand = { version = "0.7", features = ["small_rng"] }
 itertools = "0.8"
+rand = { version = "0.7", features = ["small_rng"] }
+rcgen = "0.7"
+tokio = { version = "0.2", features = ["macros", "sync"] }
+quinn = { version = "0.5", git = "https://github.com/djc/quinn", branch = "sync-defragmented" }
 
 [profile.release]
 debug = true
