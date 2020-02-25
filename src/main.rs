@@ -1,9 +1,13 @@
 use std::{
-	net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket}, sync::Arc
+	net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket}, sync::{Arc, Mutex}
 };
 
-use futures::StreamExt;
+use futures::{
+	future::{join_all, Either}, StreamExt
+};
+use itertools::Itertools;
 use quinn::{Certificate, ClientConfig, ClientConfigBuilder, ServerConfigBuilder};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 // use tokio::runtime::{Builder, Runtime};
 // use tokio::prelude::*;
 
@@ -16,35 +20,128 @@ async fn main() {
 	// )
 	// .unwrap();
 
-	let cert = Endpoint::cert();
-	let a = Endpoint::new(None); //Some(cert.clone()));
-	let b = Endpoint::new(None); //Some(cert));
-	for i in 0..10_000 {
-		let receive = async {
-			let mut receiver = a.receiver().await;
-			let mut buf = [0; 10];
-			receiver.read_exact(&mut buf).await.unwrap();
-			// println!("{:?}", buf);
+	let rng = SmallRng::seed_from_u64(0);
+	let endpoints = 2;
+	let iterations = 100_000;
+	println!(
+		"{} channels: {:?}",
+		(0..endpoints).permutations(2).count(),
+		(0..endpoints).permutations(2).collect::<Vec<_>>()
+	);
+	let endpoints = (0..endpoints).map(|_| Endpoint::new()).collect::<Vec<_>>();
+	join_all(endpoints.iter().permutations(2).flat_map(|ends| {
+		let sender_endpoint = ends[0];
+		let receiver_endpoint = ends[1];
+		let rng = SmallRng::from_rng(rng.clone()).unwrap();
+		let rng1 = rng.clone();
+		let sending = async move {
+			println!("sending");
+			let mut rng = rng1;
+			let mut sender = None;
+			for i in 0..iterations {
+				if i % 1000 == 0 {
+					println!("s {}", i)
+				};
+				if rng.gen() {
+					if sender.is_none() {
+						// println!("s create");
+						sender = Some(sender_endpoint.sender(receiver_endpoint.pid()).await);
+					// println!("s /create");
+					} else {
+						// println!("s drop");
+						sender.take().unwrap().finish().await.unwrap();
+						// println!("s /drop");
+					}
+				} else {
+					if let Some(sender) = &mut sender {
+						// println!("s write");
+						sender.write_all(b"0123456789").await.unwrap();
+						// println!("s /write");
+					}
+				}
+			}
+			if let Some(mut sender) = sender {
+				// println!("s finish");
+				sender.finish().await.unwrap();
+				// println!("s /finish");
+			}
 		};
-		let send = async {
-			let mut sender = b.sender(a.pid.clone()).await;
-			sender.write_all(b"0123456789").await.unwrap();
-			sender.finish().await.unwrap();
+		let receiving = async move {
+			println!("receiving");
+			let mut rng = rng;
+			let mut receiver = None;
+			for i in 0..iterations {
+				if i % 1000 == 0 {
+					println!("r {}", i)
+				};
+				if rng.gen() {
+					if receiver.is_none() {
+						// println!("r create");
+						receiver = Some(receiver_endpoint.receiver(sender_endpoint.pid()).await);
+					// println!("r /create");
+					} else {
+						// println!("r drop");
+						receiver.take().unwrap(); //.finish().await.unwrap();
+						  // println!("r /drop");
+					}
+				} else {
+					if let Some(receiver) = &mut receiver {
+						let mut buf = [0; 10];
+						// println!("r read");
+						receiver.read_exact(&mut buf).await.unwrap();
+						// println!("r /read");
+					}
+				}
+			}
+			// if let Some(receiver) = receiver {
+			// receiver.finish().await.unwrap();
+			// }
 		};
+		println!("both");
+		vec![Either::Left(sending), Either::Right(receiving)]
+	}))
+	.await;
+	join_all(endpoints.iter().map(|endpoint| endpoint.wait_idle())).await;
 
-		tokio::join!(receive, send);
-	}
-	tokio::join!(a.wait_idle(), b.wait_idle());
+	// 	let receiver = receiver_endpoint.receiver();
+	// for i in 0..10_000 {
+	// 	if i % 100 == 0 { println!("{}", i) }
+	// 	if rng.gen() {
+	// 		if rng.gen() {
+	// 			endpoints.push(Endpoint::new(None));
+	// 		// } else {
+	// 			// delete en
+	// 		}
+	// 	}
+	// }
+	// let a = Endpoint::new(None); //Some(cert.clone()));
+	// let b = Endpoint::new(None); //Some(cert));
+	// {
+	// 	let receive = async {
+	// 		let mut receiver = a.receiver().await;
+	// 		let mut buf = [0; 10];
+	// 		receiver.read_exact(&mut buf).await.unwrap();
+	// 		// println!("{:?}", buf);
+	// 	};
+	// 	let send = async {
+	// 		let mut sender = b.sender(a.pid.clone()).await;
+	// 		sender.write_all(b"0123456789").await.unwrap();
+	// 		sender.finish().await.unwrap();
+	// 	};
+
+	// 	tokio::join!(receive, send);
+	// }
+	// tokio::join!(a.wait_idle(), b.wait_idle());
 
 	println!("done");
 }
 
 #[derive(Clone)]
-struct Pid(SocketAddr, Certificate);
+pub struct Pid(SocketAddr, Certificate);
 
-struct Endpoint {
+pub struct Endpoint {
 	listen: quinn::Endpoint,
-	incoming: quinn::Incoming,
+	incoming: Mutex<quinn::Incoming>,
 	connect: quinn::Endpoint,
 	pid: Pid,
 }
@@ -55,8 +152,8 @@ impl Endpoint {
 		let cert = Certificate::from_der(&cert.serialize_der().unwrap()).unwrap();
 		(cert, key)
 	}
-	fn new(cert: Option<(quinn::Certificate, quinn::PrivateKey)>) -> Self {
-		let (cert, key) = cert.unwrap_or_else(Self::cert);
+	pub fn new() -> Self {
+		let (cert, key) = Self::cert();
 		let cert_chain = quinn::CertificateChain::from_certs(vec![cert.clone()]);
 
 		let transport = quinn::TransportConfig::default();
@@ -78,15 +175,16 @@ impl Endpoint {
 
 		Self {
 			listen: listen_endpoint,
-			incoming,
+			incoming: Mutex::new(incoming),
 			connect: connect_endpoint,
 			pid: Pid(addr, cert),
 		}
 	}
-	async fn sender(&self, pid: Pid) -> quinn::SendStream {
+	pub async fn sender(&self, pid: Pid) -> quinn::SendStream {
 		let mut client_config = ClientConfigBuilder::new(ClientConfig::default());
 		client_config.add_certificate_authority(pid.1).unwrap();
-		self.connect
+		let mut sender = self
+			.connect
 			.connect_with(client_config.build(), &pid.0, "a")
 			.unwrap()
 			.await
@@ -94,21 +192,37 @@ impl Endpoint {
 			.connection
 			.open_uni()
 			.await
-			.unwrap()
+			.unwrap();
+		sender
+			.write_all(&self.pid.0.port().to_ne_bytes())
+			.await
+			.unwrap();
+		sender
 	}
-	async fn receiver(&self) -> quinn::RecvStream {
+	pub async fn receiver(&self, pid: Pid) -> quinn::RecvStream {
 		let quinn::NewConnection {
 			mut uni_streams, ..
-		} = (&self.incoming)
+		} = self
+			.incoming
+			.lock()
+			.unwrap()
 			.next()
 			.await
 			.expect("accept")
 			.await
 			.expect("connect");
-		uni_streams.next().await.unwrap().unwrap()
+		let mut receiver = uni_streams.next().await.unwrap().unwrap();
+		let mut buf = [0; 2];
+		receiver.read_exact(&mut buf).await.unwrap();
+		let port = u16::from_ne_bytes(buf);
+		assert_eq!(port, pid.0.port(), "todo");
+		receiver
 	}
-	async fn wait_idle(&self) {
+	pub async fn wait_idle(&self) {
 		tokio::join!(self.listen.wait_idle(), self.connect.wait_idle());
+	}
+	pub fn pid(&self) -> Pid {
+		self.pid.clone()
 	}
 }
 

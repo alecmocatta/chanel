@@ -22,9 +22,10 @@ maintenance = { status = "passively-maintained" }
 futures = "0.3"
 rcgen = "0.7"
 tokio = { version = "0.2", features = ["macros"] }
-# quinn = { version = "0.5", git = "https://github.com/djc/quinn" }
-quinn = { version = "0.5", path = "quinn/quinn" }
-
+quinn = { version = "0.5", git = "https://github.com/djc/quinn", branch = "sync-defragmented" }
+# quinn = { version = "0.5", path = "quinn/quinn" }
+rand = { version = "0.7", features = ["small_rng"] }
+itertools = "0.8"
 
 [profile.release]
 debug = true
