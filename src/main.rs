@@ -1,17 +1,15 @@
-use futures::{
-	future::{join_all, Either}, StreamExt
-};
+use either::Either;
+use futures::{future::join_all, StreamExt};
 use itertools::Itertools;
 use quinn::{Certificate, ClientConfig, ClientConfigBuilder, ServerConfigBuilder};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::{
-	net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket}, sync::Arc
+	net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket}, sync::{Arc, Mutex}
 };
-use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() {
-	let rng = SmallRng::seed_from_u64(0);
+	let mut rng = SmallRng::seed_from_u64(0);
 	let endpoints = 2;
 	let iterations = 100_000;
 	println!(
@@ -20,59 +18,69 @@ async fn main() {
 		(0..endpoints).permutations(2).collect::<Vec<_>>()
 	);
 	let endpoints = (0..endpoints).map(|_| Endpoint::new()).collect::<Vec<_>>();
-	join_all(endpoints.iter().permutations(2).enumerate().flat_map(|(i, ends)| {
+	join_all(endpoints.iter().permutations(2).flat_map(|ends| {
 		let sender_endpoint = ends[0];
 		let receiver_endpoint = ends[1];
-		let rng = SmallRng::from_rng(rng.clone()).unwrap();
-		let rng1 = rng.clone();
-		let sending = async move {
-			println!("sending {}", i);
-			let mut rng = rng1;
-			let mut sender = None;
+		let mut rng = SmallRng::from_rng(&mut rng).unwrap();
+		vec![
+			Either::Left((sender_endpoint, receiver_endpoint.pid())),
+			Either::Right((receiver_endpoint, sender_endpoint.pid())),
+		]
+		.into_iter()
+		.zip(
+			std::iter::repeat(rng.clone())
+				.zip(std::iter::repeat_with(move || SmallRng::from_rng(&mut rng).unwrap())),
+		)
+		.map(|(end_, (mut shared_rng, mut rng))| async move {
+			let mut end = end_.as_ref().map_left(|_| None).map_right(|_| None);
+			let (endpoint, pid) = end_.into_inner();
 			for i in 0..iterations {
-				if i % 1000 == 0 {
-					println!("s {}", i)
-				};
-				if rng.gen() {
-					if sender.is_none() {
-						sender = Some(sender_endpoint.sender(receiver_endpoint.pid()).await);
-					} else {
-						sender.take().unwrap().finish().await.unwrap();
+				if i % 1 == 0 {
+					println!("{}", i);
+				}
+
+				if end.as_ref().either(|sender| sender.is_none(), |receiver| receiver.is_none()) {
+					match &mut end {
+						Either::Left(sender) => *sender = Some(endpoint.sender(pid.clone()).await),
+						Either::Right(receiver) => {
+							*receiver = Some(endpoint.receiver(pid.clone()).await);
+						}
+					}
+				} else if shared_rng.gen() {
+					match &mut end {
+						Either::Left(sender) => match sender.take().unwrap().finish().await {
+							Ok(())
+							| Err(quinn::WriteError::ConnectionClosed(
+								quinn::ConnectionError::ApplicationClosed { .. },
+							)) => (),
+							Err(err) => panic!("{:?}", err),
+						},
+						Either::Right(receiver) => drop(receiver.take().unwrap()),
 					}
 				} else {
-					if let Some(sender) = &mut sender {
-						sender.write_all(b"0123456789").await.unwrap();
+					match &mut end {
+						Either::Left(Some(sender)) => {
+							sender.write_all(b"0123456789").await.unwrap();
+						}
+						Either::Right(Some(receiver)) => {
+							let mut buf = [0; 10];
+							receiver.read_exact(&mut buf).await.unwrap();
+						}
+						_ => unreachable!(),
 					}
 				}
+				if rng.gen() {
+					tokio::time::delay_for(rng.gen_range(
+						std::time::Duration::new(0, 0),
+						std::time::Duration::from_millis(1),
+					))
+					.await;
+				}
 			}
-			if let Some(mut sender) = sender {
+			if let Either::Left(Some(mut sender)) = end {
 				sender.finish().await.unwrap();
 			}
-		};
-		let receiving = async move {
-			println!("receiving {}", i);
-			let mut rng = rng;
-			let mut receiver = None;
-			for i in 0..iterations {
-				if i % 1000 == 0 {
-					println!("r {}", i)
-				};
-				if rng.gen() {
-					if receiver.is_none() {
-						receiver = Some(receiver_endpoint.receiver(sender_endpoint.pid()).await);
-					} else {
-						receiver.take().unwrap();
-					}
-				} else {
-					if let Some(receiver) = &mut receiver {
-						let mut buf = [0; 10];
-						receiver.read_exact(&mut buf).await.unwrap();
-					}
-				}
-			}
-		};
-		println!("channel {}", i);
-		vec![Either::Left(sending), Either::Right(receiving)]
+		})
 	}))
 	.await;
 	join_all(endpoints.iter().map(|endpoint| endpoint.wait_idle())).await;
@@ -98,6 +106,7 @@ impl Endpoint {
 		let cert = Certificate::from_der(&cert.serialize_der().unwrap()).unwrap();
 		(cert, key)
 	}
+	#[allow(clippy::new_without_default)]
 	pub fn new() -> Self {
 		let (cert, key) = Self::cert();
 		let cert_chain = quinn::CertificateChain::from_certs(vec![cert.clone()]);
@@ -140,7 +149,7 @@ impl Endpoint {
 		sender
 	}
 	pub async fn receiver(&self, pid: Pid) -> quinn::RecvStream {
-		let connecting = self.incoming.lock().await.next().await;
+		let connecting = self.incoming.try_lock().unwrap().next().await;
 		let quinn::NewConnection { mut uni_streams, .. } =
 			connecting.expect("accept").await.expect("connect");
 		let mut receiver = uni_streams.next().await.unwrap().unwrap();
