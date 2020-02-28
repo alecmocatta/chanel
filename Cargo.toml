@@ -26,6 +26,7 @@ rand = { version = "0.7", features = ["small_rng"] }
 rcgen = "0.7"
 tokio = { version = "0.2", features = ["macros", "sync"] }
 quinn = { version = "0.5", git = "https://github.com/djc/quinn" }
+quinn-proto = { version = "0.5", git = "https://github.com/djc/quinn" }
 
 [profile.release]
 debug = true
