@@ -1,6 +1,6 @@
 use futures::StreamExt;
 use quinn::{
-	Certificate, ClientConfig, ClientConfigBuilder, ConnectionError, ServerConfigBuilder
+	Certificate, ClientConfig, ClientConfigBuilder, ConnectionError, NewConnection, ServerConfigBuilder, WriteError
 };
 use quinn_proto::TransportErrorCode;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
@@ -11,7 +11,7 @@ use tokio::time::delay_for;
 
 #[tokio::main]
 async fn main() {
-	let mut rng = SmallRng::seed_from_u64(0);
+	let rng = SmallRng::seed_from_u64(0);
 
 	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
 	let key = quinn::PrivateKey::from_der(&cert.serialize_private_key_der()).unwrap();
@@ -48,11 +48,9 @@ async fn main() {
 	let iterations = 100_000_000;
 	let mut shared_rng = rng.clone();
 	let shared_rng1 = shared_rng.clone();
-	let rng1 = SmallRng::from_rng(&mut rng).unwrap();
 	let client_endpoint = &client_endpoint;
 	let sending = async move {
 		let mut shared_rng = shared_rng1;
-		let mut rng = rng1;
 		let mut sender = None;
 		for i in 0..iterations {
 			if sender.is_none() {
@@ -80,9 +78,8 @@ async fn main() {
 				println!("{} sender close", i);
 				match sender.take().unwrap().finish().await {
 					Ok(())
-					| Err(quinn::WriteError::ConnectionClosed(
-						quinn::ConnectionError::ApplicationClosed(_),
-					)) => (),
+					| Err(WriteError::ConnectionClosed(ConnectionError::ApplicationClosed(_)))
+					| Err(WriteError::ConnectionClosed(ConnectionError::Reset)) => (),
 					Err(err) => panic!("{:?}", err),
 				}
 				println!("{} sender /close", i);
@@ -90,9 +87,6 @@ async fn main() {
 				println!("{} sender send", i);
 				sender.as_mut().unwrap().write_all(b"0123456789").await.unwrap();
 				println!("{} sender /send", i);
-			}
-			if rng.gen() {
-				delay_for(rng.gen_range(Duration::new(0, 0), Duration::from_micros(500))).await;
 			}
 		}
 		if let Some(mut sender) = sender {
@@ -104,10 +98,12 @@ async fn main() {
 		for i in 0..iterations {
 			if receiver.is_none() {
 				println!("{} receiver open", i);
-				let connecting = incoming.next().await;
-				let quinn::NewConnection { mut uni_streams, .. } =
-					connecting.expect("accept").await.expect("connect");
+				let connecting = incoming.next().await.expect("accept");
+				println!("{} receiver open a", i);
+				let NewConnection { mut uni_streams, .. } = connecting.await.expect("connect");
+				println!("{} receiver open b", i);
 				let mut receiver_ = uni_streams.next().await.unwrap().unwrap();
+				println!("{} receiver open c", i);
 				let mut buf = [0; 2];
 				receiver_.read_exact(&mut buf).await.unwrap();
 				assert_eq!(buf, [1, 2]);
@@ -115,9 +111,8 @@ async fn main() {
 				println!("{} receiver /open", i);
 			} else if shared_rng.gen() {
 				println!("{} receiver close", i);
-				// let fin = receiver.as_mut().unwrap().read(&mut [0]).await.unwrap();
-				// assert!(fin.is_none());
-				drop(receiver.take().unwrap());
+				let fin = receiver.take().unwrap().read(&mut [0]).await.unwrap();
+				assert!(fin.is_none());
 				println!("{} receiver /close", i);
 			} else {
 				println!("{} receiver recv", i);
@@ -126,9 +121,10 @@ async fn main() {
 				assert_eq!(&buf, b"0123456789");
 				println!("{} receiver /recv", i);
 			}
-			if rng.gen() {
-				delay_for(rng.gen_range(Duration::new(0, 0), Duration::from_micros(500))).await;
-			}
+		}
+		if let Some(mut receiver) = receiver {
+			let fin = receiver.read(&mut [0]).await.unwrap();
+			assert!(fin.is_none());
 		}
 	};
 	tokio::join!(sending, receiving);
