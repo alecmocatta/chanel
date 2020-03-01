@@ -2,15 +2,15 @@ use futures::StreamExt;
 use quinn::{
 	Certificate, ClientConfig, ClientConfigBuilder, ConnectionError, NewConnection, ServerConfigBuilder, WriteError
 };
-use quinn_proto::TransportErrorCode;
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::{
-	net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket}, sync::Arc, time::Duration
+	net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket}, sync::Arc
 };
-use tokio::time::delay_for;
 
 #[tokio::main]
 async fn main() {
+	tracing_subscriber::fmt::init();
+
 	let rng = SmallRng::seed_from_u64(0);
 
 	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
@@ -47,12 +47,13 @@ async fn main() {
 
 	let iterations = 100_000_000;
 	let mut shared_rng = rng.clone();
-	let shared_rng1 = shared_rng.clone();
+	let mut shared_rng1 = shared_rng.clone();
 	let client_endpoint = &client_endpoint;
-	let sending = async move {
-		let mut shared_rng = shared_rng1;
-		let mut sender = None;
-		for i in 0..iterations {
+	let mut sender = None;
+	let mut receiver = None;
+	for i in 0..iterations {
+		let sending = async {
+			let shared_rng = &mut shared_rng1;
 			if sender.is_none() {
 				println!("{} sender open", i);
 				let connection = loop {
@@ -62,11 +63,6 @@ async fn main() {
 						.await
 					{
 						Ok(connection) => break connection,
-						Err(ConnectionError::ConnectionClosed(close))
-							if close.error_code == TransportErrorCode::SERVER_BUSY =>
-						{
-							delay_for(Duration::from_millis(10)).await
-						}
 						Err(err) => panic!("{:?}", err),
 					}
 				};
@@ -88,14 +84,8 @@ async fn main() {
 				sender.as_mut().unwrap().write_all(b"0123456789").await.unwrap();
 				println!("{} sender /send", i);
 			}
-		}
-		if let Some(mut sender) = sender {
-			sender.finish().await.unwrap();
-		}
-	};
-	let receiving = async move {
-		let mut receiver = None;
-		for i in 0..iterations {
+		};
+		let receiving = async {
 			if receiver.is_none() {
 				println!("{} receiver open", i);
 				let connecting = incoming.next().await.expect("accept");
@@ -121,13 +111,16 @@ async fn main() {
 				assert_eq!(&buf, b"0123456789");
 				println!("{} receiver /recv", i);
 			}
-		}
-		if let Some(mut receiver) = receiver {
-			let fin = receiver.read(&mut [0]).await.unwrap();
-			assert!(fin.is_none());
-		}
-	};
-	tokio::join!(sending, receiving);
+		};
+		tokio::join!(sending, receiving);
+	}
+	if let Some(mut sender) = sender {
+		sender.finish().await.unwrap();
+	}
+	if let Some(mut receiver) = receiver {
+		let fin = receiver.read(&mut [0]).await.unwrap();
+		assert!(fin.is_none());
+	}
 	tokio::join!(client_endpoint.wait_idle(), server_endpoint.wait_idle());
 
 	println!("done");
