@@ -1,7 +1,5 @@
 use futures::StreamExt;
-use quinn::{
-	Certificate, ClientConfig, ClientConfigBuilder, ConnectionError, NewConnection, ServerConfigBuilder, WriteError
-};
+use quinn::{Certificate, ClientConfig, ClientConfigBuilder, NewConnection, ServerConfigBuilder};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::{
 	net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket}, sync::Arc
@@ -11,7 +9,7 @@ use std::{
 async fn main() {
 	tracing_subscriber::fmt::init();
 
-	let rng = SmallRng::seed_from_u64(0);
+	let mut rng = SmallRng::seed_from_u64(0);
 
 	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
 	let key = quinn::PrivateKey::from_der(&cert.serialize_private_key_der()).unwrap();
@@ -45,75 +43,55 @@ async fn main() {
 	client_config.add_certificate_authority(cert.clone()).unwrap();
 	let client_config = client_config.build();
 
+	let connection =
+		client_endpoint.connect_with(client_config.clone(), &addr, "localhost").unwrap();
+	let connection = connection.await.unwrap().connection;
+
+	let connecting = incoming.next().await.expect("accept");
+	let NewConnection { mut uni_streams, .. } = connecting.await.expect("connect");
+
+	let mut sender = connection.open_uni().await.unwrap();
+	sender.write_all(&[1]).await.unwrap();
+
+	let mut receiver = uni_streams.next().await.unwrap().unwrap();
+	let mut buf = [0; 1];
+	receiver.read_exact(&mut buf).await.unwrap();
+	assert_eq!(buf, [1]);
+
 	let iterations = 100_000_000;
-	let mut shared_rng = rng.clone();
-	let mut shared_rng1 = shared_rng.clone();
-	let mut sender = None;
-	let mut receiver = None;
+	const BUF: usize = 1024 * 1024;
+	let mut send_buf = vec![0; BUF];
+	rng.fill(&mut *send_buf);
+	let mut recv_buf = vec![0; BUF];
 	for i in 0..iterations {
-		let sending = async {
-			let shared_rng = &mut shared_rng1;
-			if sender.is_none() {
-				println!("{} sender open", i);
-				let connection = client_endpoint
-					.connect_with(client_config.clone(), &addr, "localhost")
-					.unwrap();
-				let connection = connection.await.unwrap();
-				let mut sender_ = connection.connection.open_uni().await.unwrap();
-				sender_.write_all(&[1, 2]).await.unwrap();
-				sender = Some(sender_);
-				println!("{} sender /open", i);
-			} else if shared_rng.gen() {
-				println!("{} sender close", i);
-				match sender.take().unwrap().finish().await {
-					Ok(())
-					| Err(WriteError::ConnectionClosed(ConnectionError::ApplicationClosed(_)))
-					| Err(WriteError::ConnectionClosed(ConnectionError::Reset)) => (),
-					Err(err) => panic!("{:?}", err),
-				}
-				println!("{} sender /close", i);
-			} else {
-				println!("{} sender send", i);
-				sender.as_mut().unwrap().write_all(b"0123456789").await.unwrap();
-				println!("{} sender /send", i);
+		let range = loop {
+			let start = rng.gen_range(0, BUF);
+			let end = rng.gen_range(0, BUF);
+			if start < end {
+				break start..end;
 			}
 		};
+		let sending = async {
+			sender.write_all(&send_buf[range.clone()]).await.unwrap();
+		};
 		let receiving = async {
-			if receiver.is_none() {
-				println!("{} receiver open", i);
-				let connecting = incoming.next().await.expect("accept");
-				println!("{} receiver open a", i);
-				let NewConnection { mut uni_streams, .. } = connecting.await.expect("connect");
-				println!("{} receiver open b", i);
-				let mut receiver_ = uni_streams.next().await.unwrap().unwrap();
-				println!("{} receiver open c", i);
-				let mut buf = [0; 2];
-				receiver_.read_exact(&mut buf).await.unwrap();
-				assert_eq!(buf, [1, 2]);
-				receiver = Some(receiver_);
-				println!("{} receiver /open", i);
-			} else if shared_rng.gen() {
-				println!("{} receiver close", i);
-				let fin = receiver.take().unwrap().read(&mut [0]).await.unwrap();
-				assert!(fin.is_none());
-				println!("{} receiver /close", i);
-			} else {
-				println!("{} receiver recv", i);
-				let mut buf = [0; 10];
-				receiver.as_mut().unwrap().read_exact(&mut buf).await.unwrap();
-				assert_eq!(&buf, b"0123456789");
-				println!("{} receiver /recv", i);
+			receiver.read_exact(&mut recv_buf[..range.len()]).await.unwrap();
+			if &send_buf[range.clone()] != &recv_buf[..range.len()] {
+				panic!(
+					"{}:\nleft:\n{:02x?}\nright:\n{:02x?}",
+					i,
+					&send_buf[range.clone()],
+					&recv_buf[..range.len()]
+				);
 			}
 		};
 		tokio::join!(sending, receiving);
 	}
-	if let Some(mut sender) = sender {
-		sender.finish().await.unwrap();
-	}
-	if let Some(mut receiver) = receiver {
-		let fin = receiver.read(&mut [0]).await.unwrap();
-		assert!(fin.is_none());
-	}
+	drop(connection);
+	drop(uni_streams);
+	sender.finish().await.unwrap();
+	let fin = receiver.read(&mut [0]).await.unwrap();
+	assert!(fin.is_none());
 	tokio::join!(client_endpoint.wait_idle(), server_endpoint.wait_idle());
 
 	println!("done");
