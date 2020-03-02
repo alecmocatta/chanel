@@ -1,15 +1,12 @@
 use futures::StreamExt;
 use quinn::{Certificate, ClientConfig, ClientConfigBuilder, NewConnection, ServerConfigBuilder};
-use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::{
-	net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket}, sync::Arc
+	convert::TryFrom, net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket}, sync::Arc
 };
 
 #[tokio::main]
 async fn main() {
 	tracing_subscriber::fmt::init();
-
-	let mut rng = SmallRng::seed_from_u64(0);
 
 	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
 	let key = quinn::PrivateKey::from_der(&cert.serialize_private_key_der()).unwrap();
@@ -59,31 +56,29 @@ async fn main() {
 	assert_eq!(buf, [1]);
 
 	let iterations = 100_000_000;
-	const BUF: usize = 1024 * 1024;
+	const BUF: usize = 100 * 1024;
 	let mut send_buf = vec![0; BUF];
-	rng.fill(&mut *send_buf);
+	for (i, chunk) in send_buf.chunks_mut(4).enumerate() {
+		*<&mut [u8; 4]>::try_from(chunk).unwrap() = u32::try_from(i).unwrap().to_be_bytes();
+	}
 	let mut recv_buf = vec![0; BUF];
+	let start = std::time::Instant::now();
 	for i in 0..iterations {
-		let range = loop {
-			let start = rng.gen_range(0, BUF);
-			let end = rng.gen_range(0, BUF);
-			if start < end {
-				break start..end;
-			}
-		};
 		let sending = async {
-			sender.write_all(&send_buf[range.clone()]).await.unwrap();
+			sender.write_all(&send_buf).await.unwrap();
 		};
 		let receiving = async {
-			receiver.read_exact(&mut recv_buf[..range.len()]).await.unwrap();
-			if &send_buf[range.clone()] != &recv_buf[..range.len()] {
+			receiver.read_exact(&mut recv_buf).await.unwrap();
+			if send_buf != recv_buf {
 				panic!(
-					"{}:\nleft:\n{:02x?}\nright:\n{:02x?}",
+					"{:?} {}:\nleft:\n{:02x?}\nright:\n{:02x?}",
+					start.elapsed(),
 					i,
-					&send_buf[range.clone()],
-					&recv_buf[..range.len()]
+					&send_buf,
+					&recv_buf,
 				);
 			}
+			recv_buf.iter_mut().for_each(|x| *x = 0);
 		};
 		tokio::join!(sending, receiving);
 	}
