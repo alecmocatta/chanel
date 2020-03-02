@@ -22,9 +22,9 @@ maintenance = { status = "actively-developed" }
 either = "1.5"
 futures = "0.3"
 itertools = "0.8"
-quinn = { version = "0.5", git = "https://github.com/djc/quinn" }
+quinn = { version = "0.5", git = "https://github.com/djc/quinn", default-features = false }
 rand = { version = "0.7", features = ["small_rng"] }
-rcgen = "0.7"
+rcgen = { version = "0.7", default-features = false }
 tokio = { version = "0.2", features = ["macros", "sync"] }
 tracing-subscriber = "0.2"
 

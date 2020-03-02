@@ -48,7 +48,6 @@ async fn main() {
 	let iterations = 100_000_000;
 	let mut shared_rng = rng.clone();
 	let mut shared_rng1 = shared_rng.clone();
-	let client_endpoint = &client_endpoint;
 	let mut sender = None;
 	let mut receiver = None;
 	for i in 0..iterations {
@@ -56,16 +55,10 @@ async fn main() {
 			let shared_rng = &mut shared_rng1;
 			if sender.is_none() {
 				println!("{} sender open", i);
-				let connection = loop {
-					match client_endpoint
-						.connect_with(client_config.clone(), &addr, "localhost")
-						.unwrap()
-						.await
-					{
-						Ok(connection) => break connection,
-						Err(err) => panic!("{:?}", err),
-					}
-				};
+				let connection = client_endpoint
+					.connect_with(client_config.clone(), &addr, "localhost")
+					.unwrap();
+				let connection = connection.await.unwrap();
 				let mut sender_ = connection.connection.open_uni().await.unwrap();
 				sender_.write_all(&[1, 2]).await.unwrap();
 				sender = Some(sender_);
