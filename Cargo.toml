@@ -22,7 +22,7 @@ maintenance = { status = "actively-developed" }
 either = "1.5"
 futures = "0.3"
 itertools = "0.8"
-quinn = { version = "0.5", git = "https://github.com/djc/quinn", rev = "e2618ef", default-features = false, features = ["tls-rustls"] }
+quinn = { version = "0.5", git = "https://github.com/djc/quinn", default-features = false, features = ["tls-rustls"] }
 rand = { version = "0.7", features = ["small_rng"] }
 rcgen = { version = "0.7", default-features = false }
 tokio = { version = "0.2", features = ["macros", "sync"] }
