@@ -19,7 +19,7 @@ async fn main() {
 	let cert_chain = quinn::CertificateChain::from_certs(vec![cert.clone()]);
 
 	let mut transport = quinn::TransportConfig::default();
-	transport.idle_timeout(None).unwrap();
+	transport.max_idle_timeout(None).unwrap();
 	let transport = Arc::new(transport);
 
 	let mut server_config = quinn::ServerConfig::default();
